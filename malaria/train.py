@@ -2,19 +2,69 @@ import json
 import os
 
 import numpy as np
-from efficientnet.keras import (
-    EfficientNetB3,
+from efficientnet.tfkeras import (
     center_crop_and_resize,
     preprocess_input
 )
-from keras import callbacks
-from keras.models import load_model
+from efficientnet.model import EfficientNet
+from tensorflow.keras import (
+    backend,
+    callbacks,
+    layers,
+    models,
+    utils,
+)
+from tensorflow.keras.optimizers import RMSprop
+from tensorflow.keras.models import load_model
+from kerastuner.tuners import Hyperband
 from matplotlib import pyplot as plt
 
 from . import prepare_data as pd
 
-BATCH_SIZE = 16
+backend.set_image_data_format('channels_last')
+
+BATCH_SIZE = 32
 EPOCHS = 100
+
+
+def build_model(hp):
+    model = EfficientNet(
+        1.0,
+        1.0,
+        128,
+        hp.Choice(
+            'dropout_rate',
+            values=[1e-1, 2e-1, 3e-1, 4e-1, 5e-1],
+            default=2e-1,
+        ),
+        backend=backend,
+        classes=2,
+        drop_connect_rate=hp.Choice(
+            'drop_connect_rate',
+            values=[1e-1, 2e-1, 3e-1, 4e-1, 5e-1],
+            default=2e-1,
+        ),
+        include_top=True,
+        input_shape=(128, 128, 3),
+        input_tensor=None,
+        layers=layers,
+        model_name='efficientnet-b0',
+        models=models,
+        pooling=None,
+        utils=utils,
+        weights=None,
+    )
+    model.compile(
+        loss='categorical_crossentropy',
+        optimizer=RMSprop(
+            learning_rate=0.256,
+            decay=0.9,
+            momentum=0.9,
+            epsilon=1.0,
+        ),
+        metrics=['categorical_accuracy']
+    )
+    return model
 
 
 def train(cell_images_path):
@@ -24,17 +74,47 @@ def train(cell_images_path):
         model = load_model('malaria.hdf5')
     else:
         print('CREATING MODEL')
-        model = EfficientNetB3(classes=2, weights=None,
-                               input_shape=(128, 128, 3))
 
     print('LOADING IMAGE PATHS AND LABELS')
     x_train, x_test, y_train, y_test = pd.prepare_data_lists(cell_images_path)
 
-    model.compile(
-        loss='categorical_crossentropy',
-        optimizer='SGD',
-        metrics=['accuracy']
+    print('TUNING MODEL')
+    tuner = Hyperband(
+        build_model,
+        objective='val_categorical_accuracy',
+        max_epochs=10,
+        directory='hyperband',
+        project_name='malaria',
+        hyperband_iterations=81,
     )
+    print(tuner.search_space_summary())
+    tuner.search(
+        pd.provide_training_data(
+            x_train,
+            y_train,
+            BATCH_SIZE,
+            128
+        ),
+        steps_per_epoch=len(x_train) // BATCH_SIZE,
+        validation_data=pd.provide_validation_data(
+            x_test,
+            y_test,
+            BATCH_SIZE,
+            128
+        ),
+        validation_steps=len(x_test) // BATCH_SIZE,
+        callbacks=[
+            callbacks.EarlyStopping(
+                monitor='val_loss',
+                min_delta=0.1,
+                patience=3,
+                mode='min',
+                restore_best_weights=True
+            ),
+        ]
+    )
+    print(tuner.results_summary())
+    model = tuner.get_best_models(num_models=1)[0]
 
     print('TRAINING MODEL')
     history = model.fit_generator(
@@ -50,12 +130,14 @@ def train(cell_images_path):
                 min_delta=0.1,
                 patience=3,
                 mode='min',
-                restore_best_weights=True),
+                restore_best_weights=True
+            ),
             callbacks.ModelCheckpoint(
                 'malaria.hdf5',
                 monitor='loss',
                 mode='min',
-                save_best_only=True),
+                save_best_only=True
+            ),
             callbacks.CSVLogger('malaria.log', append=True),
         ],
         validation_data=pd.provide_validation_data(
@@ -64,8 +146,8 @@ def train(cell_images_path):
         validation_steps=len(x_test) // BATCH_SIZE,
     )
 
-    plt.plot(history.history['accuracy'])
-    plt.plot(history.history['val_accuracy'])
+    plt.plot(history.history['categorical_accuracy'])
+    plt.plot(history.history['val_categorical_accuracy'])
     plt.title('Model accuracy')
     plt.ylabel('Accuracy')
     plt.xlabel('Epoch')
@@ -87,7 +169,7 @@ def train(cell_images_path):
             x_test,
             y_test,
             BATCH_SIZE,
-            model.input_shape[1]
+            128,
         ),
         steps=len(x_test),
         verbose=1,
