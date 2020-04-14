@@ -1,81 +1,69 @@
-from keras.preprocessing.image import img_to_array, load_img
-from keras.utils import to_categorical, Sequence
-from efficientnet.keras import center_crop_and_resize
-from . import prepare_data as pd
-from keras.models import load_model
-from keras import callbacks
-from efficientnet.keras import (EfficientNetB3, center_crop_and_resize,
-                                preprocess_input)
-from keras.layers.core import Activation
-from keras.models import Model
-from efficientnet.keras import EfficientNetB0, center_crop_and_resize, preprocess_input
+import json
 import os
 
 import numpy as np
+from efficientnet.tfkeras import (
+    center_crop_and_resize,
+    preprocess_input
+)
+from efficientnet.model import EfficientNet
+from tensorflow.keras import (
+    backend,
+    callbacks,
+    layers,
+    models,
+    utils,
+)
+from tensorflow.keras.optimizers import RMSprop
+from tensorflow.keras.models import load_model
+from kerastuner.tuners import Hyperband
+from matplotlib import pyplot as plt
 
 
-BATCH_SIZE = 8
+backend.set_image_data_format('channels_last')
+
+BATCH_SIZE = 32
 EPOCHS = 100
 
 
-class MalariaSequence(Sequence):
-    """Sequence that represents our Malaria dataset."""
-
-    def _get_imgs(self, path):
-        """Get list of image paths for a given `path`."""
-        return [
-            os.path.join(path, img)
-            for img in os.listdir(path)
-            if img.lower().endswith('.png')
-        ]
-
-    def _prepare_imgs(self, img_paths, image_size):
-        """Process image paths into prepared images."""
-        return [
-            center_crop_and_resize(
-                img_to_array(
-                    load_img(
-                        img_path,
-                        target_size=image_size,
-                        color_mode="rgb",
-                        interpolation="bicubic"
-                    ),
-                    data_format='channels_last'
-                ),
-                image_size
-            )
-            for img_path in img_paths
-        ]
-
-    def __init__(
-        self,
-        parasitized_path,
-        uninfected_path,
-        image_size,
-        batch_size=32,
-    ):
-        parasitized_imgs = self._get_imgs(parasitized_path)
-        uninfected_imgs = self._get_imgs(uninfected_path)
-        labels = np.array(
-            ([1] * len(parasitized_imgs)) +
-            ([0] * len(uninfected_imgs))
-        )
-        self.batch_size = batch_size
-        self.image_size = image_size
-        self.x = np.array(parasitized_imgs + uninfected_imgs)
-        self.y = labels
-
-    def __len__(self):
-        return int(np.ceil(len(self.x) / float(self.batch_size)))
-
-    def __getitem__(self, idx):
-        batch_x = self.x[idx * self.batch_size:(idx + 1) * self.batch_size]
-        batch_y = self.y[idx * self.batch_size:(idx + 1) * self.batch_size]
-        # NOTE: Shape issue here
-        x = np.array(self._prepare_imgs(batch_x, self.image_size))
-        y = to_categorical(batch_y, num_classes=2)
-
-        return x, y
+def build_model(hp):
+    model = EfficientNet(
+        1.0,
+        1.0,
+        128,
+        hp.Choice(
+            'dropout_rate',
+            values=[1e-1, 2e-1, 3e-1, 4e-1, 5e-1],
+            default=2e-1,
+        ),
+        backend=backend,
+        classes=2,
+        drop_connect_rate=hp.Choice(
+            'drop_connect_rate',
+            values=[1e-1, 2e-1, 3e-1, 4e-1, 5e-1],
+            default=2e-1,
+        ),
+        include_top=True,
+        input_shape=(128, 128, 3),
+        input_tensor=None,
+        layers=layers,
+        model_name='efficientnet-b0',
+        models=models,
+        pooling=None,
+        utils=utils,
+        weights=None,
+    )
+    model.compile(
+        loss='categorical_crossentropy',
+        optimizer=RMSprop(
+            learning_rate=0.256,
+            decay=0.9,
+            momentum=0.9,
+            epsilon=1.0,
+        ),
+        metrics=['categorical_accuracy']
+    )
+    return model
 
 
 def train(cell_images_path):
@@ -85,40 +73,107 @@ def train(cell_images_path):
         model = load_model('malaria.hdf5')
     else:
         print('CREATING MODEL')
-        model = EfficientNetB3(classes=2, weights=None)
 
     print('LOADING IMAGE PATHS AND LABELS')
     x_train, x_test, y_train, y_test = pd.prepare_data_lists(cell_images_path)
 
-    model.compile(loss='categorical_crossentropy',
-                  optimizer='SGD',
-                  metrics=['accuracy'])
+    print('TUNING MODEL')
+    tuner = Hyperband(
+        build_model,
+        objective='val_categorical_accuracy',
+        max_epochs=10,
+        directory='hyperband',
+        project_name='malaria',
+        hyperband_iterations=81,
+    )
+    print(tuner.search_space_summary())
+    tuner.search(
+        pd.provide_training_data(
+            x_train,
+            y_train,
+            BATCH_SIZE,
+            128
+        ),
+        steps_per_epoch=len(x_train) // BATCH_SIZE,
+        validation_data=pd.provide_validation_data(
+            x_test,
+            y_test,
+            BATCH_SIZE,
+            128
+        ),
+        validation_steps=len(x_test) // BATCH_SIZE,
+        callbacks=[
+            callbacks.EarlyStopping(
+                monitor='val_loss',
+                min_delta=0.1,
+                patience=3,
+                mode='min',
+                restore_best_weights=True
+            ),
+        ]
+    )
+    print(tuner.results_summary())
+    model = tuner.get_best_models(num_models=1)[0]
 
     print('TRAINING MODEL')
-    model.fit_generator(pd.provide_training_data(x_train, y_train, BATCH_SIZE,
-                                                 model.input_shape[1]),
-                        epochs=EPOCHS,
-                        steps_per_epoch=len(x_train) // BATCH_SIZE,
-                        verbose=1,
-                        callbacks=[
-                            callbacks.EarlyStopping(monitor='loss',
-                                                    min_delta=0.01,
-                                                    patience=3,
-                                                    mode='min',
-                                                    restore_best_weights=True),
-                            callbacks.ModelCheckpoint('malaria.hdf5',
-                                                      monitor='loss',
-                                                      mode='min',
-                                                      save_best_only=True),
-    ])
+
+    history = model.fit_generator(
+        pd.provide_training_data(
+            x_train, y_train, BATCH_SIZE, 128
+        ),
+        epochs=EPOCHS,
+        steps_per_epoch=len(x_train) // BATCH_SIZE,
+        verbose=1,
+        callbacks=[
+            callbacks.EarlyStopping(
+                monitor='loss',
+                min_delta=0.1,
+                patience=3,
+                mode='min',
+                restore_best_weights=True
+            ),
+            callbacks.ModelCheckpoint(
+                'malaria.hdf5',
+                monitor='loss',
+                mode='min',
+                save_best_only=True
+            ),
+            callbacks.CSVLogger('malaria.log', append=True),
+        ],
+        validation_data=pd.provide_validation_data(
+            x_test, y_test, BATCH_SIZE, 128
+        ),
+        validation_steps=len(x_test) // BATCH_SIZE,
+    )
+
+    plt.plot(history.history['categorical_accuracy'])
+    plt.plot(history.history['val_categorical_accuracy'])
+    plt.title('Model accuracy')
+    plt.ylabel('Accuracy')
+    plt.xlabel('Epoch')
+    plt.legend(['Train', 'Test'], loc='upper left')
+    plt.savefig('accuracy.png', format='png')
+    plt.clf()
+
+    plt.plot(history.history['loss'])
+    plt.plot(history.history['val_loss'])
+    plt.title('Model loss')
+    plt.ylabel('Loss')
+    plt.xlabel('Epoch')
+    plt.legend(['Train', 'Test'], loc='upper left')
+    plt.savefig('loss.png', format='png')
+
     print('EVALUATING MODEL')
     predict = model.evaluate_generator(
-        pd.provide_validation_data(x_test, y_test, BATCH_SIZE,
-                                   model.input_shape[1]),
-        steps=len(x_test) // BATCH_SIZE,
+        pd.provide_validation_data(
+            x_test,
+            y_test,
+            BATCH_SIZE,
+            128,
+        ),
+        steps=len(x_test),
         verbose=1,
     )
 
     print(f'LOSS: {predict[0]}')
     print(f'ACCURACY: {predict[1]}')
-    print(predict)
