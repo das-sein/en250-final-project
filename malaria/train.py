@@ -1,17 +1,21 @@
+from keras.preprocessing.image import img_to_array, load_img
+from keras.utils import to_categorical, Sequence
+from efficientnet.keras import center_crop_and_resize
+from . import prepare_data as pd
+from keras.models import load_model
+from keras import callbacks
+from efficientnet.keras import (EfficientNetB3, center_crop_and_resize,
+                                preprocess_input)
+from keras.layers.core import Activation
+from keras.models import Model
+from efficientnet.keras import EfficientNetB0, center_crop_and_resize, preprocess_input
 import os
 
 import numpy as np
-import matplotlib as plt
-from efficientnet.keras import EfficientNetB0, center_crop_and_resize, preprocess_input
-from keras.models import Model
-from keras.layers.core import Activation
-
-from . import prepare_data as pd
 
 
-from efficientnet.keras import center_crop_and_resize, preprocess_input
-from keras.utils import to_categorical, Sequence
-from keras.preprocessing.image import img_to_array, load_img
+BATCH_SIZE = 8
+EPOCHS = 100
 
 
 class MalariaSequence(Sequence):
@@ -32,6 +36,7 @@ class MalariaSequence(Sequence):
                 img_to_array(
                     load_img(
                         img_path,
+                        target_size=image_size,
                         color_mode="rgb",
                         interpolation="bicubic"
                     ),
@@ -74,21 +79,46 @@ class MalariaSequence(Sequence):
 
 
 def train(cell_images_path):
-    model = EfficientNetB0(weights=None, classes=2)
+    print('INSTANTIATING MODEL')
+    if os.path.exists('malaria.hdf5'):
+        print('LOADING MODEL')
+        model = load_model('malaria.hdf5')
+    else:
+        print('CREATING MODEL')
+        model = EfficientNetB3(classes=2, weights=None)
 
-    # x_train, x_test, y_train, y_test = pd.prepare_data(
-    # cell_images_path, model.input_shape[1])
+    print('LOADING IMAGE PATHS AND LABELS')
+    x_train, x_test, y_train, y_test = pd.prepare_data_lists(cell_images_path)
 
     model.compile(loss='categorical_crossentropy',
-                  optimizer='SGD', metrics=['accuracy'])
+                  optimizer='SGD',
+                  metrics=['accuracy'])
 
-    model.fit(MalariaSequence('data/cell_images/Parasitized/',
-                              'data/cell_images/Uninfected/', model.input_shape[1], 32), epochs=1)
-    predict = model.evaluate(MalariaSequence('data/cell_images/Parasitized/',
-                                             'data/cell_images/Uninfected/', model.input_shape[1], 32))
-    # trained = model.fit(x_train, y_train, epochs=1, batch_size=32,
-    # verbose=1, workers=8, use_multiprocessing=True)
-    # predict = model.evaluate(x_test, y_test)
+    print('TRAINING MODEL')
+    model.fit_generator(pd.provide_training_data(x_train, y_train, BATCH_SIZE,
+                                                 model.input_shape[1]),
+                        epochs=EPOCHS,
+                        steps_per_epoch=len(x_train) // BATCH_SIZE,
+                        verbose=1,
+                        callbacks=[
+                            callbacks.EarlyStopping(monitor='loss',
+                                                    min_delta=0.01,
+                                                    patience=3,
+                                                    mode='min',
+                                                    restore_best_weights=True),
+                            callbacks.ModelCheckpoint('malaria.hdf5',
+                                                      monitor='loss',
+                                                      mode='min',
+                                                      save_best_only=True),
+    ])
+    print('EVALUATING MODEL')
+    predict = model.evaluate_generator(
+        pd.provide_validation_data(x_test, y_test, BATCH_SIZE,
+                                   model.input_shape[1]),
+        steps=len(x_test) // BATCH_SIZE,
+        verbose=1,
+    )
 
-    print(f'loss: {predict[0]}')
-    print(f'accuracy: {predict[1]}')
+    print(f'LOSS: {predict[0]}')
+    print(f'ACCURACY: {predict[1]}')
+    print(predict)
