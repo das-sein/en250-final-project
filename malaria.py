@@ -81,26 +81,6 @@ def load_data(parasitized_path=PARASITIZED_PATH,
     return x_train, x_test, y_train, y_test
 
 
-class MalariaSequence(Sequence):
-    def __init__(self, x, y, batch_size=BATCH_SIZE, image_size=224):
-        self.x = x
-        self.y = y
-        self.batch_size = batch_size
-        self.image_size = image_size
-
-    def __len__(self):
-        return int(np.ceil(len(self.x) / float(self.batch_size)))
-
-    def __getitem__(self, idx):
-        batch_x = self.x[idx * self.batch_size:(idx + 1) * self.batch_size]
-        batch_y = self.y[idx * self.batch_size:(idx + 1) * self.batch_size]
-
-        return_x = [process_img(i, self.image_size) for i in batch_x]
-        return_y = [l for l in batch_y]
-
-        return np.array(return_x), np.array(return_y)
-
-
 with tf.device('/device:GPU:0'):
     train_datagen = ImageDataGenerator(horizontal_flip=True,
                                        vertical_flip=True,
@@ -137,7 +117,6 @@ imgs_train, imgs_test, labels_train, labels_test = load_data()
 
 with tf.device('/device:GPU:0'):
     fitted_model = model.fit(
-        #MalariaSequence(imgs_train, labels_train),
         train_gen,
         epochs=EPOCHS,
         verbose=1,
@@ -157,7 +136,6 @@ with tf.device('/device:GPU:0'):
     )
 
     evaluated_model = model.evaluate(
-        #MalariaSequence(imgs_test, labels_test),
         validation_gen,
         verbose=1,
         use_multiprocessing=True,
