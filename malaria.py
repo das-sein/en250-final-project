@@ -106,16 +106,14 @@ with tf.device('/device:GPU:0'):
         class_mode='categorical',
         subset='validation')
 
-with tf.device('/device:GPU:0'):
     model.compile(
         loss='categorical_crossentropy',
         optimizer='adam',
         metrics=['categorical_accuracy'],
     )
 
-imgs_train, imgs_test, labels_train, labels_test = load_data()
+    imgs_train, imgs_test, labels_train, labels_test = load_data()
 
-with tf.device('/device:GPU:0'):
     fitted_model = model.fit(
         train_gen,
         epochs=EPOCHS,
